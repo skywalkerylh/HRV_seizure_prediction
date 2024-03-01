@@ -14,25 +14,33 @@ def plot( history_train, history_test,patient):
         plt.show()
         
 def metrics(ytrue, ypred):
+    senstivity,specificity=0,0
     acc= len(np.where(ypred==ytrue)[0])/len(ytrue)
-    print('acc',acc)
-    if not np.all(ytrue==0):
+    print('acc',round(acc,2))
+    if not np.all(ytrue==0) and not np.all(ytrue==1):
 
         tn, fp, fn, tp = confusion_matrix(ytrue, ypred).ravel()
-        fpr= fp/ (fp+tn)
-        
         specificity = tn / (tn+fp)
         senstivity= tp / (tp+fn)
-
-    
-        print('sensitivitiy:', senstivity)
-        print('specificity:', specificity)
-        print('fpr: ',fpr)
+        print('sensitivitiy:', round(senstivity,2))
+        print('specificity:',round( specificity,2))
+      
+    return acc, senstivity, specificity
     
 def metrics_individual(ytrue, ypred):
     change_idx= np.where(ytrue==1)[0][-1]
-    print(change_idx)
+    #print(change_idx)
     print('first subject')
-    metrics(ytrue[:change_idx], ypred[:change_idx])
+    acc1, senstivity1, specificity1= metrics(ytrue[:change_idx], ypred[:change_idx])
     print('second subject')
-    metrics(ytrue[change_idx:], ypred[change_idx:])
+    acc2, senstivity2, specificity2= metrics(ytrue[change_idx+1:], ypred[change_idx+1:])
+    print('2nd ytrue',ytrue[change_idx+1:])
+    print('2nd ypred',ypred[change_idx+1:])
+    return acc1, senstivity1, specificity1, acc2, senstivity2, specificity2
+
+def record_metrics(acc_list, sensitivity_list, specificity_list, \
+                   acc_value, sensitivity_value, specificity_value):
+    acc_list.append(acc_value)
+    sensitivity_list.append(sensitivity_value)
+    specificity_list.append(specificity_value)
+    return acc_list, sensitivity_list, specificity_list

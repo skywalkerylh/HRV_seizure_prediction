@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from utils import metrics, metrics_individual
+from utils import metrics, metrics_individual, plot
 
 class DomainAdaptationTrainer:
     def __init__(self, feature_extractor, label_predictor, domain_classifier, \
@@ -32,8 +32,8 @@ class DomainAdaptationTrainer:
             target_dataloader: target data的dataloader
             lamb: 調控adversarial的loss係數。
         '''
-
             lamb=0.1
+            #lamb=np.log(1.02+1.7*epoch/self.max_epochs)
             # D loss: Domain Classifier的loss
             # F loss: Feature Extrator & Label Predictor的loss
             # total_hit: 計算目前對了幾筆 total_num: 目前經過了幾筆
@@ -82,7 +82,7 @@ class DomainAdaptationTrainer:
                 train_D_loss= running_D_loss / (i+1)
                 train_F_loss= running_F_loss / (i+1)
                 train_acc= total_hit / total_num
-                # rec6rd
+               
                 
                 if train_D_loss+train_F_loss< min_loss:
                     min_loss= train_D_loss+train_F_loss
@@ -111,9 +111,111 @@ class DomainAdaptationTrainer:
 
         pred_labels= np.concatenate(pred_labels)
         true_labels= np.concatenate(true_labels)
+        #print('pred',pred_labels)
+        #print('true',true_labels)
+        
+        
+        if len(test_patients)>1:
+            self.acc1, self.sensitivity1, self.specificity1, self.acc2, self.sensitivity2, self.specificity2= metrics_individual(true_labels ,pred_labels)
+        else:
+            self.acc1, self.sensitivity1, self.specificity1= metrics(true_labels ,pred_labels)
+        return self
+
+class LSTMTrainer:
+    def __init__(self,patient,  model, train_dataloader, val_dataloader, test_dataloader, \
+                   criterion, optimizer, device, max_epochs, interval):
+        self.patient= patient
+        self.model= model
+        self.train_dataloader= train_dataloader
+        self.val_dataloader= val_dataloader
+        self.test_dataloader= test_dataloader
+        self.criterion= criterion
+        self.optimizer= optimizer
+        self.device= device
+        self.max_epochs= max_epochs
+        self.interval = interval
+
+ 
+
+    def evaluate(self):
+        pred_labels, true_labels= [], []
+        self.model.load_state_dict(torch.load(f'P{self.patient}_weight.pth'))
+        self.model.eval()
+
+        with torch.no_grad():
+            for data, label in self.test_dataloader:
+                data= data.cuda()
+                label= label.cuda()
+                output, _ = self.model(data)
+                pred_label = torch.argmax(output, dim=1).cpu().detach().numpy()
+                pred_labels.append(pred_label)
+                true_labels.append(label.cpu().numpy())
+        
+        pred_labels= np.concatenate(pred_labels)
+        true_labels= np.concatenate(true_labels)
         print('pred',pred_labels)
         print('true',true_labels)
+        self.acc, self.sensitivity, self.specificity =metrics(true_labels, pred_labels)
+        return self
+    def train(self):
+       
+        self.model.to(self.device)
+        min_loss=1e10
+        history_train = {'loss': [], 'acc': []}
+        history_val = {'loss': [], 'acc': []}
+
         
-        metrics(true_labels ,pred_labels)
-        if len(test_patients)>1:
-            metrics_individual(true_labels ,pred_labels)
+        for epoch in range(self.max_epochs):
+      
+            num_correct = 0
+            val_num_correct=0
+            train_len, val_len=0,0
+            train_loss, val_loss=0.0, 0.0
+            self.model.train() 
+            
+            for i,( data, target )in enumerate( self.train_dataloader):
+                data, target = data.to(self.device), target.to(self.device)
+                output,_ = self.model(data) 
+                loss = self.criterion(output, target) 
+                train_loss+=loss
+                self.optimizer.zero_grad()
+                loss.backward()  
+                self.optimizer.step()
+                y_pred = output.argmax(dim=1)
+                num_correct += (y_pred == target).sum().item()
+                train_len+= len(target)
+
+            train_accuracy = float(num_correct) / train_len * 100
+            train_loss= train_loss/(i+1)#train_len
+            history_train['loss'].append(train_loss)
+            history_train['acc'].append(train_accuracy)
+
+            self.model.eval()
+            with torch.no_grad():
+                for i,( data, target )in enumerate( self.val_dataloader):
+                    data, target = data.to(self.device), target.to(self.device)
+                    output,_ = self.model(data) 
+                    loss = self.criterion(output, target) 
+                    val_loss+=loss
+                    y_pred = output.argmax(dim=1)
+                    val_num_correct += (y_pred == target).sum().item()
+                    val_len+= len(target)
+
+            val_accuracy = float(val_num_correct) / val_len * 100
+            val_loss= val_loss/(i+1)#train_len
+            history_val['loss'].append(val_loss)
+            history_val['acc'].append(val_accuracy)
+
+
+            if val_loss < min_loss:
+                min_loss= val_loss
+            
+                torch.save(self.model.state_dict(),f'P{self.patient}_weight.pth')
+
+            if (epoch+1)%self.interval ==0:
+          
+                print(f'[Epoch {epoch + 1}/{self.max_epochs}]'
+                    f" loss: {history_train['loss'][-1]:.4f}, acc: {history_train['acc'][-1]:2.2f}%"
+                    f" loss: {history_val['loss'][-1]:.4f}, acc: {history_val['acc'][-1]:2.2f}%")
+    
+    

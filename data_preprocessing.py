@@ -81,6 +81,8 @@ class RawDataset:
             self.data= self.data.iloc[criteria]
             self.label= self.label.iloc[criteria]
             self.info= self.info.iloc[criteria]
+        
+        return self
            
     def append_dataset(self, dataset):
         self.data= pd.concat([self.data, dataset.data], ignore_index=True)
@@ -92,7 +94,22 @@ class RawDataset:
         self.label= self.label.reset_index(drop=True)
         self.info= self.info.reset_index(drop=True)
         return self
-    
+    def split(self,train_ratio, val_ratio):
+       
+        dataset_size = len(self.data)
+        train_size = int(train_ratio * dataset_size)
+        val_size= int(val_ratio*dataset_size)
+        test_size= dataset_size - train_size - val_size
+ 
+        train_data = self.data.iloc[:train_size]
+        train_label = self.label.iloc[:train_size]
+        val_data= self.data.iloc[train_size:train_size+val_size]
+        val_label= self.label.iloc[train_size:train_size+val_size]
+        test_data = self.data.iloc[-test_size-1:-1]
+        test_label = self.label.iloc[-test_size-1:-1]
+
+        return train_data, train_label, val_data, val_label, test_data, test_label
+
 
 class EventFilter():
     def __init__(self, patient, stride, \
@@ -195,5 +212,31 @@ class LSTMDataset(Dataset):
         return X,y
 
 
+def preprocessing_pipeline(HRV_dataset, normalization, seizureNum, patient, ds_freq):
+    stride=2.5
+    preictal_start_before_onset=30
+    preictal_end_before_onset=5
+    interictal_start_before_onset=90
+    interictal_end_before_onset=30
+    
+    if normalization:
+                    HRV_dataset =  HRV_dataset.normalization()
+                        
+    #eventfilter
+    if patient in seizureNum:
+        event_filter= EventFilter(patient= patient, stride=stride, preictal_start_before_onset=preictal_start_before_onset,\
+                                preictal_end_before_onset=preictal_end_before_onset, \
+                                interictal_start_before_onset=interictal_start_before_onset,\
+                                interictal_end_before_onset= interictal_end_before_onset   )
+        HRV_dataset= event_filter.apply( HRV_dataset, HRV_dataset.label)
+        #print('after event filter ', HRV_dataset.data.shape)
+        
+    else:
+        random_select_rows= np.arange(10,36,1, dtype=int)
+        HRV_dataset.apply_row_changes(random_select_rows)
+        #print('nonseizure',HRV_dataset.data.shape)
+    #downsampling 
+    HRV_dataset=HRV_dataset.downsampling(sampling_class_label=0, sampling_freq=ds_freq)
 
+    return HRV_dataset
 
