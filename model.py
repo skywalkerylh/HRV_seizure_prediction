@@ -32,14 +32,12 @@ class DomainClassifier(nn.Module):
         super(DomainClassifier, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, 1)
-        self.sigmoid = nn.Sigmoid()
-
+        self.fc2 = nn.Linear(hidden_size, 2)
+       
     def forward(self, x):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
-        #x = self.sigmoid(x)
         return x
 
 class LabelPredictor(nn.Module):
@@ -48,11 +46,12 @@ class LabelPredictor(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(hidden_size,2)
-
+        
     def forward(self, x):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
+      
         return x
 
 
@@ -65,7 +64,9 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        
+        ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        #ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
 
@@ -112,3 +113,29 @@ def generate_LOSO_train_test_subjects(run_index, all_train_patients,seizureNum):
             print('train patients', train_patients)
             print('test patients', test_patients)
     return train_patients, test_patients
+
+def initialize_model(name, hidden_size, num_layers, bidirectional, device, features, lr, \
+                     domain_classifier_hidden=None ):
+    
+    if bidirectional:
+        bi=2
+    else:
+        bi=1
+    if name== 'dann': 
+        feature_extractor = FeatureExtractor(input_size=len(features), hidden_size= hidden_size, num_layers= num_layers, bidirectional= bidirectional).to(device)
+        label_predictor = LabelPredictor(input_size=hidden_size*num_layers*bi, hidden_size=  domain_classifier_hidden).to(device)
+        domain_classifier = DomainClassifier(input_size=hidden_size*num_layers*bi, hidden_size= domain_classifier_hidden).to(device)
+        class_criterion= FocalLoss(alpha=1, gamma=2, reduction='mean')
+        domain_criterion=  nn.BCEWithLogitsLoss()
+        optimizer_F = torch.optim.Adam(feature_extractor.parameters(), lr=lr)
+        optimizer_C = torch.optim.Adam(label_predictor.parameters(), lr=lr)
+        optimizer_D = torch.optim.Adam(domain_classifier.parameters(), lr=lr)
+
+        return feature_extractor, label_predictor, domain_classifier, domain_classifier, \
+            class_criterion, domain_criterion, optimizer_C, optimizer_D, optimizer_F
+    elif name== 'lstm':
+        model = LSTM(input_size=len(features), hidden_size=hidden_size, output_size=2, num_layer=num_layers, bidirectional=bidirectional)
+        #criterion = nn.BCEWithLogitsLoss()
+        criterion= FocalLoss(alpha=1, gamma=2, reduction='mean')
+        optimizer=torch.optim.Adam(model.parameters(), lr=lr)
+        return model, criterion, optimizer
