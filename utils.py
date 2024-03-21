@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import confusion_matrix
+import pandas as pd
 
 def plot( history_train, history_test,patient):
         fig, axes = plt.subplots(ncols=2, figsize=(9, 4.5))
@@ -44,3 +45,24 @@ def record_metrics(acc_list, sensitivity_list, specificity_list, \
     sensitivity_list.append(sensitivity_value)
     specificity_list.append(specificity_value)
     return acc_list, sensitivity_list, specificity_list
+
+def gen_pred_info(pred_labels,dataset, len_sequence, patient):
+    
+    # remove head n len_sequence
+    dataset= dataset.apply_row_changes(np.arange(len_sequence-1,len(dataset.label),1))
+    # select 2nd subject ypred
+    change_idx= np.where(dataset.label.values==1)[0][-1]
+    pred_labels= pred_labels[change_idx+1:]
+    pred_labels= pd.DataFrame(pred_labels, columns= ['prediction'])
+    
+    # select 2nd subject ytrue
+    dataset= dataset.apply_row_changes(np.arange(change_idx+1, len(dataset.label),1))
+    assert len(dataset.label) == len(pred_labels)
+    
+    # get info 
+    dataset.data['patient']= patient
+    pred_labels.index= dataset.data.index
+    pred_info= pd.concat([dataset.data, dataset.info, pred_labels], axis=1)
+    print('pred info', pred_info.shape)
+
+    return pred_info
