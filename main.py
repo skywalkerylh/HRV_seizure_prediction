@@ -4,342 +4,225 @@ from torch.utils.data import DataLoader
 import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
+from typing import List, Tuple, Dict, Optional
+from dataclasses import dataclass
 
 from data_preprocessing import IO, LSTMDataset, preprocessing_pipeline
-from model import FeatureExtractor, DomainClassifier, LabelPredictor,FocalLoss, LSTM, generate_LOSO_train_test_subjects, initialize_model
+from model import (
+    FeatureExtractor, 
+    DomainClassifier, 
+    LabelPredictor,
+    FocalLoss, 
+    LSTM, 
+    generate_LOSO_train_test_subjects, 
+    initialize_model
+)
 from train import DomainAdaptationTrainer, LSTMTrainer
-from utils import record_metrics, gen_pred_info
+from utils import record_metrics, gen_pred_info, plot_tsne, visualize, set_seed
 
-seizureNum= [10,12,15,17,18,36]
-seizureNum_nolabel= [1,2,3,4,13,20,25,27,28,33]
-folder='0909_overlap_epochingbyPoints'
-batch_size= 32
-normalization=False
-interval=20
-ds_freq=2
-downsampling=False
-len_sequence=14
-lr=1e-5
-features= ['SDNN', 'RMSSD','pNN50', 'TOTAL_POWER','VLF_POWER','LF_POWER', 'HF_POWER','LF_TO_HF', 'SampEn', 'patient']
-#features= ['SDNN', 'RMSSD','pNN50', 'ApEn', 'SampEn']
+@dataclass
+class ModelConfig:
+    """Configuration class for model hyperparameters"""
+    hidden_size: int = 512
+    num_layers: int = 2
+    bidirectional: bool = True
+    domain_classifier_hidden: int = 512
+    learning_rate: float = 1e-5
+    batch_size: int = 32
+    max_epochs: int = 30
+    sequence_length: int = 5
+    interval: int = 10
 
-def internal_validation():
-    train_patients =[12,17,18 ,31,16,34]
-    #train_patients =[10,12,11,16,24,26,31,34,36]
-    #train_patients=[10,12,11,21,9,35,36]
-    max_epochs=5
-    hidden_size=200
-    num_layers=2
-    bidirectional=True
-    domain_classifier_hidden=800
-    select_random_rows= False
-    all_acc1, all_sensitivity1, all_specificity1=[],[],[]
-    all_acc2, all_sensitivity2, all_specificity2=[],[],[]
-
-    #train dataset
-    print('train patients: ',train_patients)
-    train_dataset=None
-    idx=0
-    for patient in train_patients:
-        
-        path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
-        if patient==18:
-            path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/rmecgoutlier_feature_P{patient}.csv" 
-        HRV_dataset= IO.read_raw_csv(path, patient, folder, idx)
-       
-        HRV_dataset= preprocessing_pipeline(HRV_dataset, seizureNum, seizureNum_nolabel, patient,features, \
-                           downsampling= downsampling, 
-                           normalization= normalization,
-                           select_random_rows= False,
-                           ds_freq=None)
-        # stack data
-        if train_dataset is None:
-            train_dataset= HRV_dataset
-        else:
-            train_dataset.append_dataset(HRV_dataset)
-        idx+=1
- 
-    print('new train data',train_dataset.data.to_numpy().shape,train_dataset.label.to_numpy().shape)
-    train_datasets = LSTMDataset(train_dataset.data.to_numpy(),train_dataset.label.to_numpy(), len_sequence, normalization)
-    train_dataloader= DataLoader(train_datasets, batch_size=batch_size, shuffle=False)
+@dataclass
+class DataConfig:
+    """Configuration class for data preprocessing parameters"""
+    normalization: bool = True
+    downsampling: bool = False
+    select_random_rows: bool = False
+    features: List[str] = None
     
-    #test scheme
-    #nonseizure_test_num=  [1] 
-    nonseizure_test_num= [29,31,16,34,24,26,22]
-    #nonseizure_test_num= [9,21,22,29,35]
-    for non_seizure_test in nonseizure_test_num:
-        if non_seizure_test not in seizureNum:
-            test_patients= [15,non_seizure_test] 
-        else:
-            test_patients= [non_seizure_test]
-        
-        acc_list1, sensitivity_list1, specificity_list1=[],[],[]
-        acc_list2, sensitivity_list2, specificity_list2=[],[],[]
-        for seed in range(1):
-            torch.manual_seed(seed)
-            # test dataset
-            test_dataset=None
-            idx=0
-            for patient in test_patients:
-                path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
-                if patient==18:
-                    path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/rmecgoutlier_feature_P{patient}.csv" 
-                HRV_dataset= IO.read_raw_csv(path, patient, folder, idx)
-                #print('raw ', HRV_dataset.data.shape)
-                HRV_dataset= preprocessing_pipeline(HRV_dataset, seizureNum, seizureNum_nolabel, patient,features, \
-                           downsampling= downsampling, 
-                           normalization= normalization,
-                           select_random_rows=select_random_rows,
-                           ds_freq=None)
-                idx+=1
-        
-                # stack data
-                if test_dataset is None:
-                    test_dataset= HRV_dataset
-                else:
-                    test_dataset.append_dataset(HRV_dataset)
+    def __post_init__(self):
+        if self.features is None:
+            self.features = [
+                'RRMean', 'SDNN', 'RMSSD', 'pNN50', 'TOTAL_POWER',
+                'VLF_POWER', 'LF_POWER', 'HF_POWER', 'LF_TO_HF', 'SampEn'
+            ]
 
-            test_dataset= test_dataset.select_features(features)
+class DataProcessor:
+    """Handles data loading and preprocessing operations"""
+    def __init__(self, data_config: DataConfig):
+        self.config = data_config
+        self.seizure_nums = [10, 12, 15, 17, 18, 36]
+        self.seizure_nums_nolabel = [1, 2, 3, 4, 13, 20, 25, 27, 28, 33]
+        self.arrhythmia = [1, 2, 3, 4, 8, 9, 17, 32]
+
+    def load_and_preprocess_data(
+        self, 
+        patient: int, 
+        folder: str,
+        idx: int
+    ) -> Tuple[pd.DataFrame, np.ndarray]:
+        """Load and preprocess data for a single patient"""
+        path = f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
+        
+        # Handle special cases for different patient types
+        if patient in self.arrhythmia:
+            folder = '0909_overlap_epochingbyPoints'
+            path = f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
             
-            print('new test data',test_dataset.data.to_numpy().shape,test_dataset.label.to_numpy().shape)
-            test_datasets = LSTMDataset(test_dataset.data.to_numpy(),test_dataset.label.to_numpy(), len_sequence, normalization)
-            test_dataloader= DataLoader(test_datasets, batch_size=batch_size, shuffle=False)
-
-            device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-            feature_extractor, label_predictor, domain_classifier, domain_classifier, \
-            class_criterion, domain_criterion, optimizer_C, optimizer_D, optimizer_F= initialize_model(name= 'dann', 
-                                                                                                        hidden_size=hidden_size, 
-                                                                                                        num_layers=num_layers,
-                                                                                                        bidirectional= bidirectional,
-                                                                                                        device=device,
-                                                                                                        features=features,
-                                                                                                        lr=lr, 
-                                                                                                        domain_classifier_hidden=domain_classifier_hidden)
-            trainer = DomainAdaptationTrainer(feature_extractor, label_predictor, domain_classifier, \
-                        optimizer_F, optimizer_C, optimizer_D, \
-                        train_dataloader,test_dataloader, max_epochs, interval, device,\
-                            domain_criterion, class_criterion, patient= test_patients[0])
-            trainer.train()
-            pred_labels= trainer.only_prediction(test_dataloader)
-            pred_info= gen_pred_info(pred_labels, test_dataset, len_sequence, test_patients[1])
-            pred_info.to_csv(f'../external_prediction/P{test_patients[1]}.csv')
-            vars = trainer.evaluate(test_dataloader, test_patients)
-            acc_list1, sensitivity_list1, specificity_list1= record_metrics(acc_list1, sensitivity_list1, specificity_list1, \
-                            vars.acc1, vars.sensitivity1, vars.specificity1)
-            if len(test_patients)>1:
-                acc_list2, sensitivity_list2, specificity_list2= record_metrics(acc_list2 ,sensitivity_list2, specificity_list2, \
-                            vars.acc2, vars.sensitivity2, vars.specificity2)
-
+        dataset = IO.read_raw_csv(path, patient, folder, idx)
+        dataset.data['patient'] = idx
         
-        all_acc1, all_sensitivity1, all_specificity1= record_metrics(all_acc1, all_sensitivity1, all_specificity1, \
-                        round(np.mean(acc_list1),2),round(np.mean(sensitivity_list1),2), round(np.mean(specificity_list1),2) )
-        if len(test_patients)>1:
-            all_acc2, all_sensitivity2, all_specificity2= record_metrics(all_acc2, all_sensitivity2, all_specificity2, \
-                        round(np.mean(acc_list2),2),round(np.mean(sensitivity_list2),2), round(np.mean(specificity_list2),2) )
-
-        print('all acc1', all_acc1)
-        print('all sen1', all_sensitivity1)
-        print('all speci1', all_specificity1)
-        if len(test_patients)>1:
-            print('all acc2', all_acc2)
-            print('all sen2', all_sensitivity2)
-            print('all speci2', all_specificity2)
-
-def LOSO():
-    #all_train_patients= [10,12,15,11,16,24,26,31,34,17,18,36]
-    all_train_patients=[10,15,36,11,21,9]
-    max_epochs=50
-    hidden_size=200
-    num_layers=2
-    bidirectional=True
-    domain_classifier_hidden=800
-    lr=1e-3
-    all_acc, all_sensitivity, all_specificity=[],[],[]
-    normalization=False
-    '''
-    seizure so so , nonseizure good  
-    epoch 100
-    h 200
-    dh 800
-    le 1e-3
-    norm False
-    '''
-    '''
-    nonseizure good,but decrease 15, seizure not good 
-    max_epochs=100
-    hidden_size=9*10
-    domain_classifier_hidden=9*10*6
-    lr=1e-3
-    '''
-    for run_index in range(len(all_train_patients)):
-        # split train test subjects
-        train_patients, test_patients= generate_LOSO_train_test_subjects(run_index, all_train_patients,seizureNum)
-        acc, sensitivity, specificity=[],[],[]
-        # repetitive exp
-        for seed in range(3):
-            torch.manual_seed(seed)
-
-            #train dataset
-            train_dataset=None
-            idx=0
-            for patient in train_patients:
-                path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
-                if patient==18:
-                    path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/rmecgoutlier_feature_P{patient}.csv" 
-                HRV_dataset= IO.read_raw_csv(path, patient, folder , idx)
-                #print('raw ', HRV_dataset.data.shape)
-                HRV_dataset= preprocessing_pipeline(HRV_dataset, seizureNum, seizureNum_nolabel, patient,features, \
-                           downsampling= downsampling, 
-                           normalization= normalization,
-                           select_random_rows= False,
-                           ds_freq=None)
-                if patient in seizureNum:
-                    HRV_dataset= HRV_dataset.oversampling()
-                idx+=1
-                # stack data
-                if train_dataset is None:
-                    train_dataset= HRV_dataset
-                else:
-                    train_dataset.append_dataset(HRV_dataset)
-
-
-            #train_dataset= train_dataset.select_features(features)
-            print('new train data',train_dataset.data.to_numpy().shape,train_dataset.label.to_numpy().shape)
-            train_datasets = LSTMDataset(train_dataset.data.to_numpy(),train_dataset.label.to_numpy(), len_sequence, normalization=False)
-            train_dataloader= DataLoader(train_datasets, batch_size=batch_size, shuffle=False)
-           
-            # test dataset
-            test_dataset=None
-            idx=0
-            for patient in test_patients:
-                path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
-                if patient==18:
-                    path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/rmecgoutlier_feature_P{patient}.csv" 
-                HRV_dataset= IO.read_raw_csv(path, patient, folder, idx)
-                #print('raw ', HRV_dataset.data.shape)
-                HRV_dataset= preprocessing_pipeline(HRV_dataset, seizureNum, seizureNum_nolabel, patient,features, \
-                           downsampling= downsampling, 
-                           normalization= normalization,
-                           select_random_rows= False,
-                           ds_freq=None)
-                idx+=1
-                # stack data
-                if test_dataset is None:
-                    test_dataset= HRV_dataset
-                else:
-                    test_dataset.append_dataset(HRV_dataset)
-
-          
-            #test_dataset= test_dataset.select_features(features)
-            print('new train data',test_dataset.data.to_numpy().shape,test_dataset.label.to_numpy().shape)
-            test_datasets = LSTMDataset(test_dataset.data.to_numpy(),test_dataset.label.to_numpy(), len_sequence, normalization= False)
-            test_dataloader= DataLoader(test_datasets, batch_size=batch_size, shuffle=False)
-           
-            # model setting
-            device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-            feature_extractor, label_predictor, domain_classifier, domain_classifier, \
-            class_criterion, domain_criterion, optimizer_C, optimizer_D, optimizer_F= initialize_model(name= 'dann', 
-                                                                                                        hidden_size=hidden_size, 
-                                                                                                        num_layers=num_layers,
-                                                                                                        bidirectional= bidirectional,
-                                                                                                        device=device,
-                                                                                                        features=features,
-                                                                                                        lr=lr, 
-                                                                                                        domain_classifier_hidden=domain_classifier_hidden)
-            trainer = DomainAdaptationTrainer(feature_extractor, label_predictor, domain_classifier, \
-                        optimizer_F, optimizer_C, optimizer_D, \
-                        train_dataloader,test_dataloader, max_epochs, interval, device,\
-                            domain_criterion, class_criterion, patient= test_patients[0])
-            trainer.train()
-            vars = trainer.evaluate(test_dataloader, test_patients)
-            acc, sensitivity, specificity= record_metrics(acc, sensitivity, specificity, \
-                           vars.acc1, vars.sensitivity1, vars.specificity1)
-        all_acc, all_sensitivity, all_specificity= record_metrics(all_acc, all_sensitivity, all_specificity, \
-                       round(np.mean(acc),2),round(np.mean(sensitivity),2), round(np.mean(specificity),2) )
-        print('all acc', all_acc)
-        print('all sen', all_sensitivity)
-        print('all speci', all_specificity)
-
-def individual_subject():
-    
-    '''
-    no norm
-    h 400/
-    epoch 100
-    lr 1e-5
-    '''
-    stride=2.5
-    normalization=False
-    max_epochs=100
-    hidden_size=9*20
-    num_layers=2
-    bidirectional=True
-    train_ratio=0.7
-    val_ratio=0.2
-    lr = 1e-3
-    acc, sensitivity, specificity=[],[],[]
-    idx=0
-    for seed in range(1):
-        for patient in [10]:
-            torch.manual_seed(seed)
-            print(patient)
-            print('h:', hidden_size, 
-                  'lr',lr)
-            path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/feature_P{patient}.csv"
-            if patient==18:
-                path= f"G:/我的雲端硬碟/thesis/code/ECG/features/{folder}/rmecgoutlier_feature_P{patient}.csv" 
-            HRV_dataset= IO.read_raw_csv(path, patient, folder, idx)
-            print('raw ', HRV_dataset.data.shape)
-            HRV_dataset= preprocessing_pipeline(HRV_dataset, seizureNum, seizureNum_nolabel, patient,features, \
-                           downsampling= downsampling, 
-                           normalization= normalization,
-                           select_random_rows= False,
-                           ds_freq=None)
-    
-            train_data, train_label, val_data, val_label, test_data, test_label = HRV_dataset.split(train_ratio,val_ratio)
-           
-            #smote = SMOTE()
-            #train_data, train_label = smote.fit_resample(train_data, train_label)
-            class_weights=  (train_label==1).sum()/((train_label==1).sum()+(train_label==0).sum())
-            print('class proportion ', class_weights)
-            print((train_label==1).sum(), (train_label==0).sum())
+        processed_dataset = preprocessing_pipeline(
+            dataset,
+            self.seizure_nums,
+            self.seizure_nums_nolabel,
+            patient,
+            self.config.features,
+            downsampling=self.config.downsampling,
+            normalization=self.config.normalization,
+            select_random_rows=self.config.select_random_rows,
+            ds_freq=2
+        )
         
-            train_dataset = LSTMDataset(train_data.to_numpy(),train_label.to_numpy(), len_sequence, normalization)
-            train_dataloader= DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-            val_dataset = LSTMDataset(val_data.to_numpy(),val_label.to_numpy(), len_sequence, normalization)
-            val_dataloader= DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-            test_dataset = LSTMDataset(test_data.to_numpy(),test_label.to_numpy(), len_sequence, normalization)
-            test_dataloader= DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-            print('train data', train_data.shape)
-            print('val data', val_data.shape)
-            print('test data', test_data.shape)
-            
-            device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-            
-            model, criterion, optimizer= initialize_model(name= 'lstm',
-                                                    hidden_size=hidden_size, 
-                                                    num_layers=num_layers,
-                                                    bidirectional= bidirectional,
-                                                    device=device,
-                                                    features=features,
-                                                    lr=lr, 
-                                                    domain_classifier_hidden=None)
-            # Initialize trainer
-            trainer= LSTMTrainer(patient, model, train_dataloader, val_dataloader, test_dataloader, \
-                    criterion, optimizer, device, max_epochs, interval)
-            # Train and evaluate
-            trainer.train()
-            vars= trainer.evaluate()
-            acc.append(vars.acc)
-            sensitivity.append(vars.sensitivity)
-            specificity.append(vars.specificity)
+        self._handle_missing_values(processed_dataset)
+        return processed_dataset
 
-    print('averaged acc',round(np.mean(acc),2), '\t', round(np.std(acc),2))
-    print('sen acc',round(np.mean(sensitivity),2), '\t', round(np.std(sensitivity),2))
-    print('speci acc',round(np.mean(specificity),2), '\t', round(np.std(specificity),2))
+    def _handle_missing_values(self, dataset) -> None:
+        """Handle missing values in the dataset"""
+        if np.any(np.isnan(dataset.data)):
+            nan_rows = dataset.data[dataset.data.isnull().any(axis=1)]
+            print("Imputing missing values...")
+            dataset.data = dataset.data.ffill()
+
+class ExperimentRunner:
+    """Manages experiment execution"""
+    def __init__(
+        self, 
+        model_config: ModelConfig,
+        data_config: DataConfig,
+        data_processor: DataProcessor
+    ):
+        self.model_config = model_config
+        self.data_config = data_config
+        self.data_processor = data_processor
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    def run_internal_validation(
+        self,
+        train_patients: List[int],
+        val_patients: List[int],
+        test_patients: List[int]
+    ) -> Dict:
+        """Run internal validation experiment"""
+        # Prepare datasets
+        train_data = self._prepare_training_data(train_patients)
+        test_data = self._prepare_test_data(test_patients)
+        
+        # Initialize model and trainer
+        model_components = self._initialize_model_components()
+        trainer = self._setup_trainer(model_components, train_data, test_data)
+        
+        # Train and evaluate
+        trainer.train()
+        results = trainer.evaluate(test_data, test_patients)
+        
+        return self._format_results(results)
+
+    def _prepare_training_data(self, patients: List[int]) -> DataLoader:
+        """Prepare training data"""
+        dataset = None
+        for idx, patient in enumerate(patients):
+            current_dataset = self.data_processor.load_and_preprocess_data(
+                patient, '0909_overlap_epochingbyPoints', idx
+            )
+            dataset = current_dataset if dataset is None else dataset.append_dataset(current_dataset)
+
+        if self.data_config.normalization:
+            dataset = self._apply_smote(dataset)
+            
+        return self._create_dataloader(dataset)
+
+    def _apply_smote(self, dataset) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply SMOTE for handling class imbalance"""
+        smote = SMOTE()
+        return smote.fit_resample(dataset.data, dataset.label)
+
+    def _create_dataloader(self, dataset) -> DataLoader:
+        """Create DataLoader from dataset"""
+        dataset = LSTMDataset(
+            dataset.data.to_numpy(),
+            dataset.label.to_numpy(),
+            self.model_config.sequence_length,
+            self.data_config.normalization
+        )
+        return DataLoader(dataset, batch_size=self.model_config.batch_size, shuffle=False)
+
+    def _initialize_model_components(self) -> Tuple:
+        """Initialize model components"""
+        return initialize_model(
+            name='dann',
+            hidden_size=self.model_config.hidden_size,
+            num_layers=self.model_config.num_layers,
+            bidirectional=self.model_config.bidirectional,
+            device=self.device,
+            features=self.data_config.features,
+            lr=self.model_config.learning_rate,
+            domain_classifier_hidden=self.model_config.domain_classifier_hidden
+        )
+
+    def _setup_trainer(
+        self,
+        model_components: Tuple,
+        train_dataloader: DataLoader,
+        test_dataloader: DataLoader
+    ) -> DomainAdaptationTrainer:
+        """Setup the trainer"""
+        (
+            feature_extractor,
+            label_predictor,
+            domain_classifier,
+            _,
+            class_criterion,
+            domain_criterion,
+            optimizer_C,
+            optimizer_D,
+            optimizer_F
+        ) = model_components
+
+        return DomainAdaptationTrainer(
+            feature_extractor,
+            label_predictor,
+            domain_classifier,
+            optimizer_F,
+            optimizer_C,
+            optimizer_D,
+            train_dataloader,
+            test_dataloader,
+            self.model_config.max_epochs,
+            self.model_config.interval,
+            self.device,
+            domain_criterion,
+            class_criterion
+        )
+
+def main():
+    """Main entry point"""
+    # Initialize configurations
+    model_config = ModelConfig()
+    data_config = DataConfig()
+    data_processor = DataProcessor(data_config)
     
+    # Setup experiment
+    experiment = ExperimentRunner(model_config, data_config, data_processor)
+    
+    # Run experiment
+    train_patients = [10, 12]
+    val_patients = [11, 15]
+    test_patients = [18, 36, 24, 26, 21]
+    
+    results = experiment.run_internal_validation(train_patients, val_patients, test_patients)
+    print("Experiment Results:", results)
 
-if __name__ == "__main__":   
-    #individual_subject()
-    LOSO()
-    #internal_validation()
+if __name__ == "__main__":
+    main()
